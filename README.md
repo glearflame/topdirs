@@ -43,6 +43,22 @@ install -m755 topdirs/topdirs ~/.local/bin/topdirs
 Funciona em qualquer distro Linux com Bash 4+ e GNU coreutils (testado em
 Debian/Kali). Não é POSIX puro: usa `sort -z`, `du -0` e `read -d`.
 
+### Para usar com `sudo`
+
+`~/.local/bin` não está no `PATH` do `sudo` (ele usa `secure_path`). Se
+`sudo topdirs` responder `comando não encontrado`, instale em
+`/usr/local/bin`:
+
+```sh
+sudo install -m755 topdirs /usr/local/bin/topdirs
+```
+
+Se `/usr/local/bin` também não estiver no `secure_path` do seu `sudoers`,
+confira com `sudo printenv PATH`. O padrão Debian inclui
+`/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`; se o seu foi
+customizado para menos, ajuste o `Defaults secure_path` (ou use
+`sudo env "PATH=$PATH" topdirs`).
+
 ## Uso
 
 ```sh
