@@ -1,0 +1,586 @@
+#!/usr/bin/env bash
+#
+# topdirs — mostra as maiores pastas do sistema, com o caminho completo.
+#
+# ---------------------------------------------------------------------------
+# POR QUE ESTE SCRIPT EXISTE
+#
+# `du -h | sort -h | head -20` parece resolver o problema, mas erra em vários
+# casos reais. Este script é a versão que não erra:
+#
+#   1. Nomes com espaço, tab ou newline não quebram a ordenação (pipe NUL).
+#   2. O locale não estraga a ordenação numérica (LC_ALL=C).
+#   3. Pseudo-filesystems (/proc, /sys, /dev, /run) não entram no ranking.
+#   4. Hardlink não é somado duas vezes (uma única invocação de du).
+#   5. Diretório sem permissão vira aviso explícito, não erro engolido.
+#   6. O total varrido pode ser conferido contra o `df` (--df-check).
+#
+# ---------------------------------------------------------------------------
+# SEMÂNTICA (a parte que confunde)
+#
+# Por padrão mede ESPAÇO OCUPADO EM DISCO (blocos alocados), não tamanho
+# lógico. Uma imagem de VM de 100 GiB que ocupa 4 GiB aparece como 4 GiB.
+# Use --apparent-size para o tamanho lógico.
+#
+# Hardlinks são contados uma única vez — é o que o `df` enxerga. Consequência:
+# a segunda pasta de um arquivo com dois links pode aparecer como 0.
+#
+# Com --df-check, com root, o total deve bater com `df` quase exatamente. Se
+# não bater, a diferença tem causa conhecida: arquivo apagado mas ainda aberto,
+# bind mount (mesmo st_dev, então -x atravessa), ou filesystem no caminho.
+#
+# ---------------------------------------------------------------------------
+# LICENÇA: MIT. Veja LICENSE.
+# ---------------------------------------------------------------------------
+
+# -u  : variável não definida é erro (pega typo)
+# -o pipefail: falha no meio de um pipe não passa despercebida
+# Sem -e de propósito: queremos tratar os erros do du, não morrer neles.
+set -uo pipefail
+
+# LC_ALL=C garante duas coisas: separador decimal é ponto (sort numérico
+# confiável) e a ordenação de strings é byte-a-byte, sem surpresa de locale.
+export LC_ALL=C
+
+VERSION="1.0.0"
+
+# --- padrões --------------------------------------------------------------
+# Profundidade 2 é o padrão porque `-d 1` em / devolve só ~20 diretórios de
+# primeiro nível, o que torna um "top 20" sem sentido: a lista seria a própria
+# raiz. Em 2 aparecem as pastas que realmente interessam (ex.: /home/spingat).
+COUNT=20
+DEPTH=2
+TARGET="/"
+
+# Flags booleanas: 0 = desligado, 1 = ligado.
+CROSS=0        # -X: atravessar outros filesystems (desliga o du -x)
+INCLUDE_FILES=0 # -a: incluir arquivos além de diretórios
+APPARENT=0     # --apparent-size: tamanho lógico em vez de blocos alocados
+SHOW_BAR=1     # --no-bar desliga (JSON também desliga)
+JSON=0         # --json: saída estruturada
+GENTLE=0       # -g: nice 19 + ionice idle
+QUIET=0        # -q: só a tabela
+NO_NESTED=0    # --no-nested: esconde filho de pasta já listada
+DF_CHECK=0     # --df-check: comparar total com df
+THRESHOLD=""   # -t: repassado direto para du --threshold
+COLOR="auto"   # auto | never
+
+# Caracteres da barra. --ascii troca por "#" e "-" (terminal sem UTF-8, log).
+BAR_FULL="█"
+BAR_EMPTY="·"
+
+# /proc, /sys, /dev e /run são pseudo-filesystems: não ocupam disco e mentem.
+# Exemplo clássico: /proc/kcore aparece com tamanho aparente absurdo.
+EXCLUDES=("/proc" "/sys" "/dev" "/run")
+
+# Códigos ANSI. Ficam em variáveis para não poluir o printf.
+readonly C_RESET=$'\033[0m'
+readonly C_BOLD=$'\033[1m'
+readonly C_DIM=$'\033[2m'
+readonly C_RED=$'\033[31m'
+readonly C_YEL=$'\033[33m'
+readonly C_GRN=$'\033[32m'
+readonly C_CYA=$'\033[36m'
+
+# Erro fatal: mensagem no stderr e saída com status 1.
+die() { printf 'topdirs: %s\n' "$*" >&2; exit 1; }
+
+usage() {
+	cat <<'EOF'
+topdirs — as maiores pastas do sistema, com caminho completo
+
+USO
+  topdirs [OPÇÕES] [CAMINHO]
+
+  Sem CAMINHO, varre a raiz (/). Sempre mostra o caminho absoluto.
+
+OPÇÕES
+  -n, --count N         Quantos resultados mostrar (padrão: 20)
+  -d, --depth N         Profundidade da varredura (padrão: 2)
+  -a, --all             Incluir arquivos, não só pastas
+  -X, --cross-mounts    Atravessar outros filesystems (padrão: ficar em um só)
+      --no-nested       Esconder pasta que já está dentro de outra listada
+      --df-check        Comparar o total varrido com o "usado" do df
+      --ascii           Barras em ASCII (terminal sem UTF-8 ou log)
+  -e, --exclude PADRÃO  Excluir caminho (repetível; padrão: /proc /sys /dev /run)
+  -t, --threshold TAM   Só mostrar o que passar de TAM, ex.: 500M, 2G
+      --apparent-size   Tamanho lógico em vez de espaço ocupado em disco
+      --json            Saída JSON (uma lista de objetos)
+      --no-bar          Esconder a barra de proporção
+      --no-color        Desligar cores (também respeita NO_COLOR)
+  -g, --gentle          Prioridade baixa: nice 19 + ionice idle
+  -q, --quiet           Sem avisos e sem rodapé, só a tabela
+  -h, --help            Este texto
+  -V, --version         Versão
+
+EXEMPLOS
+  topdirs                          # top 20 de / com profundidade 2
+  topdirs -d 1                     # totais por diretório de primeiro nível
+  sudo topdirs -d 3                # varredura completa e correta
+  topdirs /home -n 10              # top 10 dentro de /home
+  topdirs -X -d 1                  # inclui /mnt, /media, discos externos
+  topdirs --json | jq -r '.[].path'
+  topdirs -t 1G -d 4 /var          # só o que passa de 1 GiB em /var
+  topdirs -d 3 --no-nested         # nada de pai e filho no mesmo top
+
+NOTAS
+  Sem root, diretórios como /root e /var/lib/docker são omitidos e o total
+  sai subestimado. O script avisa quando isso acontece.
+  Com -X, mounts de rede ou USB lento podem travar a varredura: use -g.
+  Hardlinks são contados uma única vez (uma passada só de du), então a segunda
+  pasta de um arquivo com dois links pode aparecer como 0. Isso é proposital:
+  é o espaço real em disco, o mesmo que o df enxerga. Use --apparent-size para
+  o tamanho lógico.
+EOF
+}
+
+# ---------------------------------------------------------------------------
+# PARSING DE ARGUMENTOS
+#
+# Aceita tanto `-n 5` quanto `--count=5`. O `need_value` existe para dar erro
+# claro em vez de "unbound variable" quando a opção vem sem valor.
+# ---------------------------------------------------------------------------
+need_value() { [[ $# -ge 2 && -n $2 ]] || die "opção $1 exige um valor"; }
+
+while [[ $# -gt 0 ]]; do
+	case "$1" in
+	-n | --count)
+		need_value "$@"
+		COUNT="$2"
+		shift 2
+		;;
+	--count=*)
+		COUNT="${1#*=}"
+		shift
+		;;
+	-d | --depth)
+		need_value "$@"
+		DEPTH="$2"
+		shift 2
+		;;
+	--depth=*)
+		DEPTH="${1#*=}"
+		shift
+		;;
+	-a | --all)
+		INCLUDE_FILES=1
+		shift
+		;;
+	-X | --cross-mounts)
+		CROSS=1
+		shift
+		;;
+	-e | --exclude)
+		need_value "$@"
+		EXCLUDES+=("$2")
+		shift 2
+		;;
+	--exclude=*)
+		EXCLUDES+=("${1#*=}")
+		shift
+		;;
+	-t | --threshold)
+		need_value "$@"
+		THRESHOLD="$2"
+		shift 2
+		;;
+	--threshold=*)
+		THRESHOLD="${1#*=}"
+		shift
+		;;
+	--no-nested)
+		NO_NESTED=1
+		shift
+		;;
+	--df-check)
+		DF_CHECK=1
+		shift
+		;;
+	--ascii)
+		BAR_FULL="#"
+		BAR_EMPTY="-"
+		shift
+		;;
+	--apparent-size)
+		APPARENT=1
+		shift
+		;;
+	--json)
+		JSON=1
+		SHOW_BAR=0
+		shift
+		;;
+	--no-bar)
+		SHOW_BAR=0
+		shift
+		;;
+	--no-color)
+		COLOR="never"
+		shift
+		;;
+	-g | --gentle)
+		GENTLE=1
+		shift
+		;;
+	-q | --quiet)
+		QUIET=1
+		shift
+		;;
+	-h | --help)
+		usage
+		exit 0
+		;;
+	-V | --version)
+		printf 'topdirs %s\n' "$VERSION"
+		exit 0
+		;;
+	--)
+		# Fim explícito das opções: o que vier depois é caminho, mesmo que
+		# comece com "-".
+		shift
+		if [[ $# -gt 0 ]]; then
+			TARGET="$1"
+			shift
+		fi
+		break
+		;;
+	-*)
+		die "opção desconhecida: $1 (veja --help)"
+		;;
+	*)
+		# Só um caminho por vez. TARGET comeca em "/" (o padrão), então
+		# qualquer outro valor indica que já foi passado um caminho.
+		[[ "$TARGET" != "/" ]] && die "só um caminho por vez"
+		TARGET="$1"
+		shift
+		;;
+	esac
+done
+
+# ---------------------------------------------------------------------------
+# VALIDAÇÃO
+# ---------------------------------------------------------------------------
+[[ "$COUNT" =~ ^[0-9]+$ ]] && ((COUNT > 0)) || die "-n precisa ser inteiro positivo"
+[[ "$DEPTH" =~ ^[0-9]+$ ]] || die "-d precisa ser inteiro >= 0"
+
+command -v du >/dev/null || die "du não encontrado (coreutils)"
+command -v sort >/dev/null || die "sort não encontrado (coreutils)"
+
+[[ -d "$TARGET" ]] || die "não é um diretório: $TARGET"
+# realpath resolve symlink e ".." para que a comparação com o registro total
+# do du (que vem com o caminho exato que passamos) funcione.
+TARGET="$(realpath -e -- "$TARGET" 2>/dev/null)" || die "caminho inválido"
+
+# ---------------------------------------------------------------------------
+# COR
+# Só liga quando a saída é um terminal de verdade e o usuário não pediu para
+# desligar via NO_COLOR (https://no-color.org).
+# ---------------------------------------------------------------------------
+use_color=0
+if [[ "$COLOR" == "auto" ]]; then
+	[[ -z "${NO_COLOR:-}" && -t 1 ]] && use_color=1
+fi
+
+# Envolve um código ANSI e o devolve vazio quando a cor está desligada.
+c() {
+	if ((use_color == 1)); then printf '%s' "$1"; fi
+}
+
+# ---------------------------------------------------------------------------
+# EXECUÇÃO DO DU
+#
+# -k  : tamanho em KiB inteiro. Nada de sufixo "1.2G" — ordenar depois fica
+#       numérico e exato, sem depender de sort -h.
+# -0  : registros terminados em NUL. É isso que torna o script imune a nome
+#       de arquivo com newline ou tab.
+# -x  : fica no mesmo filesystem. Sem isso, um mount USB, NFS ou um bind
+#       mount pode travar a varredura por minutos.
+# --max-depth: o que determina a granularidade do ranking.
+# ---------------------------------------------------------------------------
+tmp_out="$(mktemp)" || die "falha ao criar arquivo temporário"
+tmp_err="$(mktemp)" || die "falha ao criar arquivo temporário"
+cleanup() { rm -f -- "$tmp_out" "$tmp_err"; }
+trap cleanup EXIT INT TERM
+
+du_cmd=(du -k -0)
+((CROSS == 0)) && du_cmd+=(-x)
+((APPARENT == 1)) && du_cmd+=(--apparent-size)
+du_cmd+=(--max-depth="$DEPTH")
+[[ -n "$THRESHOLD" ]] && du_cmd+=(--threshold="$THRESHOLD")
+# --exclude aceita caminho absoluto, então as entradas padrão funcionam
+# mesmo quando o alvo não é /.
+for ex in "${EXCLUDES[@]}"; do
+	du_cmd+=("--exclude=$ex")
+done
+du_cmd+=("$TARGET")
+
+# --gentle: io mais discreto possível. Útil quando o disco está em uso.
+run_cmd=("${du_cmd[@]}")
+if ((GENTLE == 1)); then
+	command -v nice >/dev/null && run_cmd=(nice -n 19 "${run_cmd[@]}")
+	command -v ionice >/dev/null && run_cmd=(ionice -c idle "${run_cmd[@]}")
+fi
+
+((QUIET == 0 && JSON == 0)) && printf '%s> varrendo %s (profundidade %d)%s\n' \
+	"$(c "$C_DIM")" "$TARGET" "$DEPTH" "$(c "$C_RESET")" >&2
+
+start=$SECONDS
+"${run_cmd[@]}" >"$tmp_out" 2>"$tmp_err"
+du_status=$?
+elapsed=$((SECONDS - start))
+
+# du devolve 1 quando encontrou diretório sem permissão. Isso não é falha
+# fatal: o resultado continua útil, só incompleto. O aviso vem no rodapé.
+((du_status != 0 && du_status != 1)) && die "du falhou (status $du_status); veja: $tmp_err"
+
+# ---------------------------------------------------------------------------
+# COLETA
+#
+# Cada registro do du -0 é: "TAMANHO_KIB <TAB> CAMINHO <NUL>".
+# `read -d ''` divide exatamente nos NUL, então tab/newline no caminho não
+# atrapalham.
+#
+# O último registro é o próprio TARGET (o total da árvore). Ele não entra no
+# ranking, mas é guardado: é dele que sai o percentual de cada linha.
+# ---------------------------------------------------------------------------
+total_kb=0
+declare -a recs=()
+while IFS=$'\t' read -r -d '' size path; do
+	[[ -z "$size" ]] && continue
+	if [[ "$path" == "$TARGET" ]]; then
+		total_kb="$size"
+		continue
+	fi
+	recs+=("$size"$'\t'"$path")
+done <"$tmp_out"
+
+if ((${#recs[@]} == 0)); then
+	printf 'Nada encontrado em %s com profundidade %d.\n' "$TARGET" "$DEPTH" >&2
+	exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# TOP N
+#
+# sort -z -nr: NUL-safe e numérico pela primeira coluna (o tamanho em KiB).
+# Não usamos sort -h justamente porque "1.2G" é texto, e comparar texto é
+# onde a maioria dos scripts erra.
+#
+# Com --no-nested o filtro roda ANTES do corte para N: senão um punhado de
+# subpastas de /usr ocuparia todos os slots e o resto desapareceria do top.
+# ---------------------------------------------------------------------------
+candidates=$((COUNT * 50))
+((candidates < 1000)) && candidates=1000
+((NO_NESTED == 0)) && candidates=$COUNT
+
+declare -a cand=()
+while IFS= read -r -d '' line; do
+	cand+=("$line")
+done < <(printf '%s\0' "${recs[@]}" | sort -z -nr | head -z -n "$candidates")
+
+# ---------------------------------------------------------------------------
+# SEM ANINHAMENTO (opcional)
+#
+# Esconde qualquer pasta que esteja dentro de outra já presente na lista.
+# A comparação é feita contra o conjunto inteiro de candidatos, não apenas
+# contra os já aceitos: quando pai e filho têm o MESMO tamanho, a ordenação
+# pode colocar o filho antes do pai — e aí o pai escaparia do filtro.
+# ---------------------------------------------------------------------------
+declare -a top=()
+if ((NO_NESTED == 1)); then
+	declare -a kept=()
+	for line in "${cand[@]}"; do
+		p="${line#*$'\t'}"
+		skip=0
+		for other in "${cand[@]}"; do
+			op="${other#*$'\t'}"
+			[[ "$op" == "$p" ]] && continue
+			if [[ "$p" == "$op"/* ]]; then
+				skip=1
+				break
+			fi
+		done
+		((skip == 0)) && kept+=("$line")
+		((${#kept[@]} >= COUNT)) && break
+	done
+	top=("${kept[@]}")
+else
+	top=("${cand[@]}")
+fi
+
+# ---------------------------------------------------------------------------
+# ERROS DO DU
+#
+# Duas contagens separadas: "Permission denied" (esperado sem root) e
+# qualquer outro erro de I/O (disco com problema, mount caído). Mostrar as
+# duas misturadas esconderia um disco falhando atrás de permissões normais.
+# ---------------------------------------------------------------------------
+denied=0
+other_err=0
+if [[ -s "$tmp_err" ]]; then
+	denied="$(grep -c 'Permission denied' "$tmp_err" 2>/dev/null || true)"
+	other_err="$(grep -vc 'Permission denied' "$tmp_err" 2>/dev/null || true)"
+	denied=${denied:-0}
+	other_err=${other_err:-0}
+fi
+
+# ---------------------------------------------------------------------------
+# FORMATAÇÃO
+# ---------------------------------------------------------------------------
+
+# Escapa caracteres de controle que quebrariam a tabela. O dado real segue
+# intacto no JSON; isso é só apresentação.
+display_path() {
+	local s="$1"
+	s="${s//$'\n'/\\n}"
+	s="${s//$'\t'/\\t}"
+	s="${s//$'\r'/\\r}"
+	printf '%s' "$s"
+}
+
+# KiB -> "4.8MiB". Usa numfmt quando existe; senão cai num awk equivalente,
+# para o script funcionar em sistema mínimo.
+human() {
+	local kb="$1"
+	if command -v numfmt >/dev/null; then
+		numfmt --to=iec-i --suffix=B --format='%.1f' $((kb * 1024))
+	else
+		awk -v k="$kb" 'BEGIN {
+			split("B KiB MiB GiB TiB PiB", u, " "); i = 1; v = k
+			while (v >= 1024 && i < 6) { v /= 1024; i++ }
+			printf (i == 1 ? "%d%s" : "%.1f%s"), v, u[i]
+		}'
+	fi
+}
+
+# ---------------------------------------------------------------------------
+# SAÍDA JSON
+#
+# Uma lista de objetos, um por pasta. jq é usado para escapar o caminho com
+# segurança (aspas, barra invertida, UTF-8), então nome estranho não gera
+# JSON inválido. Percentual tem duas casas, calculado em inteiro.
+# ---------------------------------------------------------------------------
+if ((JSON == 1)); then
+	command -v jq >/dev/null || die "--json requer jq"
+	printf '['
+	first=1
+	for line in "${top[@]}"; do
+		kb="${line%%$'\t'*}"
+		p="${line#*$'\t'}"
+		((first == 0)) && printf ','
+		first=0
+		jq -cn --arg path "$p" \
+			--argjson kb "$kb" \
+			--arg human "$(human "$kb")" \
+			--argjson total_kb "$total_kb" \
+			--argjson depth "$DEPTH" \
+			--arg root "$TARGET" \
+			'{path: $path, bytes: ($kb * 1024), human: $human,
+			  percent: (if $total_kb > 0 then (($kb * 10000 / $total_kb | floor) / 100) else null end),
+			  root: $root, depth: $depth}'
+	done
+	printf ']\n'
+	exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# TABELA
+#
+# A cor da barra segue a fatia ocupada: vermelho a partir de 25% do total,
+# amarelo a partir de 10%, verde abaixo. Serve para bater o olho e ver o
+# vilão, não para precisão.
+# ---------------------------------------------------------------------------
+bar_width=22
+idx=0
+if ((QUIET == 0)); then
+	printf '\n%s%-4s %10s %6s  %s%s\n' "$(c "$C_BOLD")" "#" "TAMANHO" "%" "" "$(c "$C_RESET")"
+fi
+
+for line in "${top[@]}"; do
+	kb="${line%%$'\t'*}"
+	p="${line#*$'\t'}"
+	idx=$((idx + 1))
+
+	# Percentual com uma casa decimal, tudo em aritmética inteira (sem
+	# depender de bc ou de ponto flutuante no bash).
+	if ((total_kb > 0)); then
+		pct_int=$((kb * 100 / total_kb))
+		frac=$(((kb * 1000 / total_kb) % 10))
+	else
+		pct_int=0
+		frac=0
+	fi
+
+	if ((pct_int >= 25)); then col="$C_RED"
+	elif ((pct_int >= 10)); then col="$C_YEL"
+	else col="$C_GRN"; fi
+
+	# Barra proporcional. Pasta minúscula ainda ganha 1 bloco, senão a barra
+	# fica toda vazia e parece que nada foi medido.
+	if ((SHOW_BAR == 1 && total_kb > 0)); then
+		filled=$((kb * bar_width / total_kb))
+		((filled < 1 && kb > 0)) && filled=1
+		bar=""
+		for ((i = 0; i < filled; i++)); do bar+="$BAR_FULL"; done
+		for ((i = filled; i < bar_width; i++)); do bar+="$BAR_EMPTY"; done
+		bar_disp="$(c "$col")${bar}$(c "$C_RESET")"
+	else
+		bar_disp=""
+	fi
+
+	printf '%s%2d%s %s%10s%s %3d.%d%%  %s %s\n' \
+		"$(c "$C_DIM")" "$idx" "$(c "$C_RESET")" \
+		"$(c "$C_BOLD")" "$(human "$kb")" "$(c "$C_RESET")" \
+		"$pct_int" "$frac" \
+		"$bar_disp" \
+		"$(c "$C_CYA")$(display_path "$p")$(c "$C_RESET")"
+done
+
+# ---------------------------------------------------------------------------
+# RODAPÉ
+#
+# Aqui ficam os avisos que evitam interpretação errada do resultado. O mais
+# importante é o de permissão: sem root a lista PARECE completa, mas não é.
+# ---------------------------------------------------------------------------
+if ((QUIET == 0)); then
+	printf '\n%s%d pasta(s) · total varrido %s · %ds%s\n' \
+		"$(c "$C_DIM")" "${#recs[@]}" "$(human "$total_kb")" "$elapsed" "$(c "$C_RESET")"
+	if ((CROSS == 0)); then
+		printf '%sFilesystem único (-x). Use -X para incluir outros mounts.%s\n' \
+			"$(c "$C_DIM")" "$(c "$C_RESET")"
+	fi
+	if ((INCLUDE_FILES == 1)); then
+		printf '%sIncluindo arquivos (-a).%s\n' \
+			"$(c "$C_DIM")" "$(c "$C_RESET")"
+	fi
+	if ((EUID != 0)) && ((denied > 0)); then
+		printf '%sAVISO: %d diretório(s) sem permissão de leitura — total subestimado.%s\n' \
+			"$(c "$C_YEL")" "$denied" "$(c "$C_RESET")" >&2
+		printf '%s       Rode com sudo para o resultado completo.%s\n' \
+			"$(c "$C_YEL")" "$(c "$C_RESET")" >&2
+	fi
+	if ((other_err > 0)); then
+		printf '%s%d erro(s) de I/O ignorado(s).%s\n' \
+			"$(c "$C_DIM")" "$other_err" "$(c "$C_RESET")" >&2
+	fi
+
+	# --df-check: prova que a medição está certa (ou mostra o tamanho do
+	# buraco). Com root em /, a diferença costuma ser < 0.1%.
+	if ((DF_CHECK == 1)) && ((total_kb > 0)); then
+		df_used="$(df -k --output=used -- "$TARGET" 2>/dev/null | tail -n 1 | tr -d '[:space:]')"
+		if [[ "$df_used" =~ ^[0-9]+$ ]]; then
+			delta=$((df_used - total_kb))
+			abs_delta=${delta#-}
+			df_pct=$((abs_delta * 100 / df_used))
+			printf '\ndf do filesystem: %s usado · varrido: %s · diferença: %s (%d%%)\n' \
+				"$(human "$df_used")" "$(human "$total_kb")" \
+				"$(human "$abs_delta")" "$df_pct"
+			printf '%sDiferença esperada quando há diretório sem permissão, arquivo\n' \
+				"$(c "$C_DIM")"
+			printf 'apagado-mas-aberto, outro filesystem no caminho ou bind mount.%s\n' \
+				"$(c "$C_RESET")"
+		fi
+	fi
+fi
+
+exit 0
