@@ -1,13 +1,15 @@
 # topdirs
 
-As maiores pastas do seu sistema, com o caminho completo — em uma linha de
-comando, sem mentir.
+The biggest folders on your system, with full paths — in one command, without
+lying to you.
+
+**English** · [Português (BR)](README.pt-BR.md)
 
 ```
 $ sudo topdirs
-> varrendo / (profundidade 2)
+> scanning / (depth 2)
 
-#       TAMANHO      %
+#         SIZE    %
  1    43.6GiB  46.9%  ██████████············ /usr
  2    31.7GiB  34.1%  ███████··············· /home
  3    31.7GiB  34.1%  ███████··············· /home/spingat
@@ -18,14 +20,16 @@ $ sudo topdirs
  8     5.1GiB   5.4%  █····················· /usr/bin
  9   936.0MiB   0.9%  █····················· /var/log
 
-311 pasta(s) · total varrido 92.9GiB · 11s
-Filesystem único (-x). Use -X para incluir outros mounts.
+311 folders · 92.9GiB scanned · 11s
+Single filesystem (-x). Use -X to include other mounts.
 ```
 
-## Instalação
+*(Output is localized in Portuguese; an English locale is on the TODO list.)*
 
-Um arquivo, sem dependências além de `coreutils`. `jq` só é necessário para
-`--json`, e `numfmt` tem fallback em `awk`.
+## Install
+
+One file, no dependencies beyond `coreutils`. `jq` is only needed for
+`--json`, and `numfmt` falls back to `awk`.
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/glearflame/topdirs/main/topdirs \
@@ -33,119 +37,116 @@ curl -fsSL https://raw.githubusercontent.com/glearflame/topdirs/main/topdirs \
 chmod +x ~/.local/bin/topdirs
 ```
 
-Ou, clonando o repo (instalador incluído):
+Or clone the repo (installer included):
 
 ```sh
 git clone https://github.com/glearflame/topdirs.git
 cd topdirs
-./install.sh                 # ~/.local/bin (ou /usr/local/bin se for root)
-sudo ./install.sh            # para "sudo topdirs" funcionar
+./install.sh                 # ~/.local/bin (or /usr/local/bin as root)
+sudo ./install.sh            # so "sudo topdirs" works
 ```
 
-Funciona em qualquer distro Linux com Bash 4+ e GNU coreutils (testado em
-Debian/Kali). Não é POSIX puro: usa `sort -z`, `du -0` e `read -d`.
+Works on any Linux with Bash 4+ and GNU coreutils (tested on Debian/Kali).
+Not pure POSIX: it uses `sort -z`, `du -0` and `read -d`.
 
-### Para usar com `sudo`
+### Making `sudo` work
 
-`~/.local/bin` não está no `PATH` do `sudo` (ele usa `secure_path`). Se
-`sudo topdirs` responder `comando não encontrado`, instale em
-`/usr/local/bin`:
+`~/.local/bin` is not in sudo's `PATH` (it uses `secure_path`). If
+`sudo topdirs` says `command not found`, install into `/usr/local/bin`:
 
 ```sh
 sudo install -m755 topdirs /usr/local/bin/topdirs
 ```
 
-Se `/usr/local/bin` também não estiver no `secure_path` do seu `sudoers`,
-confira com `sudo printenv PATH`. O padrão Debian inclui
-`/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`; se o seu foi
-customizado para menos, ajuste o `Defaults secure_path` (ou use
-`sudo env "PATH=$PATH" topdirs`).
+If that still fails, check `sudo printenv PATH`. The Debian default includes
+`/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`; if yours was
+trimmed, fix `Defaults secure_path` (or use `sudo env "PATH=$PATH" topdirs`).
 
-## Uso
+## Usage
 
 ```sh
-topdirs                          # top 20 de /, profundidade 2
-sudo topdirs                     # versão completa (recomendado)
-topdirs /home -n 10              # top 10 dentro de /home
-topdirs -d 1                     # totais por diretório de primeiro nível
-topdirs -d 3 --no-nested         # sem pai e filho no mesmo ranking
-topdirs -X -d 1                  # inclui /mnt, /media, discos externos
-topdirs -t 1G -d 4 /var          # só o que passa de 1 GiB em /var
+topdirs                          # top 20 of /, depth 2
+sudo topdirs                     # complete scan (recommended)
+topdirs /home -n 10              # top 10 inside /home
+topdirs -d 1                     # totals per top-level directory
+topdirs -d 3 --no-nested         # no parent+child in the same ranking
+topdirs -X -d 1                  # include /mnt, /media, external disks
+topdirs -t 1G -d 4 /var          # only entries above 1 GiB in /var
 topdirs --json | jq -r '.[].path'
-topdirs -g                       # nice 19 + ionice idle: não estressa o disco
+topdirs -g                       # nice 19 + ionice idle: don't hammer the disk
 ```
 
-### Opções
+### Options
 
-| Opção | Efeito |
+| Option | Effect |
 | --- | --- |
-| `-n, --count N` | quantos resultados (padrão: 20) |
-| `-d, --depth N` | profundidade da varredura (padrão: 2) |
-| `-a, --all` | incluir arquivos, não só pastas |
-| `-X, --cross-mounts` | atravessar outros filesystems (padrão: `du -x`) |
-| `-e, --exclude PADRÃO` | excluir caminho (repetível; padrão: `/proc /sys /dev /run`) |
-| `-t, --threshold TAM` | só o que passar de TAM (`500M`, `2G`) |
-| `--no-nested` | esconder pasta que já está dentro de outra listada |
-| `--df-check` | comparar o total varrido com o `usado` do `df` |
-| `--apparent-size` | tamanho lógico em vez de espaço ocupado |
-| `--json` | saída JSON |
-| `--no-bar`, `--no-color`, `--ascii` | apresentação |
+| `-n, --count N` | how many results (default: 20) |
+| `-d, --depth N` | scan depth (default: 2) |
+| `-a, --all` | include files, not just folders |
+| `-X, --cross-mounts` | cross into other filesystems (default: `du -x`) |
+| `-e, --exclude PATTERN` | exclude a path (repeatable; default: `/proc /sys /dev /run`) |
+| `-t, --threshold SIZE` | only entries above SIZE (`500M`, `2G`) |
+| `--no-nested` | hide a folder that is inside another listed folder |
+| `--df-check` | compare the scanned total against `df` used |
+| `--apparent-size` | logical size instead of allocated blocks |
+| `--json` | JSON output |
+| `--no-bar`, `--no-color`, `--ascii` | presentation |
 | `-g, --gentle` | `nice 19` + `ionice idle` |
-| `-q, --quiet` | só a tabela |
-| `-h, --help`, `-V, --version` | ajuda e versão |
+| `-q, --quiet` | table only |
+| `-h, --help`, `-V, --version` | help and version |
 
-## Por que não `du -h | sort -h | head -20`
+## Why not `du -h | sort -h | head -20`
 
-Porque esse pipeline erra em casos que aparecem no mundo real:
+Because that pipeline gets real-world cases wrong:
 
-| Problema | O que acontece | O que o `topdirs` faz |
+| Problem | What happens | What `topdirs` does |
 | --- | --- | --- |
-| Nome com newline ou tab | linha quebra, caminho vira lixo no ranking | pipeline NUL (`du -0`, `sort -z`) |
-| Locale `pt_BR` | `sort -h` compara `1,2G` como texto | `LC_ALL=C` + ordenação numérica em KiB |
-| `/proc`, `/sys` | `/proc/kcore` aparece com tamanho absurdo | excluídos por padrão |
-| Hardlink | dois scripts somam o mesmo arquivo duas vezes | uma invocação só de `du` (conta uma vez) |
-| Diretório sem permissão | erro no stderr, lista parece completa | aviso explícito com a contagem |
-| Mount USB/NFS | varredura trava por minutos | `du -x` por padrão |
+| Newline or tab in a path | the line breaks, the path becomes garbage in the ranking | NUL pipeline (`du -0`, `sort -z`) |
+| `pt_BR` locale | `sort -h` compares `1,2G` as text | `LC_ALL=C` + numeric sort in KiB |
+| `/proc`, `/sys` | `/proc/kcore` shows up with an absurd size | excluded by default |
+| Hardlinks | two scripts count the same file twice | a single `du` invocation (counted once) |
+| Unreadable directory | error goes to stderr, list looks complete | explicit warning with a count |
+| USB/NFS mount | the scan hangs for minutes | `du -x` by default |
 
-## Semântica: o que o número significa
+## What the number means
 
-Por padrão, **espaço ocupado em disco** (blocos alocados), não tamanho lógico.
-Uma imagem de VM de 100 GiB que ocupa 4 GiB aparece como 4 GiB — é o que o
-`df` enxerga. Use `--apparent-size` para o tamanho lógico.
+By default: **allocated disk space** (blocks), not logical size. A 100 GiB VM
+image that occupies 4 GiB shows as 4 GiB — that's what `df` sees. Use
+`--apparent-size` for logical size.
 
-Hardlinks são contados **uma única vez**, então a segunda pasta de um arquivo
-com dois links pode aparecer como `0`. Isso é proposital.
+Hardlinks are counted **once**, so the second folder of a file with two links
+may show `0`. That is intentional.
 
-### Conferindo a medição
+### Proving the measurement
 
-`--df-check` compara o total varrido com o `usado` do `df`:
+`--df-check` compares the scanned total against `df` used:
 
 ```
 $ sudo topdirs -n 3 --no-bar --df-check /
-df do filesystem: 92.9GiB usado · varrido: 92.9GiB · diferença: 4.2MiB (0%)
+df of filesystem: 92.9GiB used · scanned: 92.9GiB · difference: 4.2MiB (0%)
 ```
 
-Com root, a diferença fica abaixo de 0.1% — é a prova de que a medição está
-correta. Sem root:
+With root the difference stays below 0.1% — proof the measurement is right.
+Without root:
 
 ```
-df do filesystem: 92.9GiB usado · varrido: 92.5GiB · diferença: 455.3MiB (0%)
-AVISO: 65 diretório(s) sem permissão de leitura — total subestimado.
+df of filesystem: 92.9GiB used · scanned: 92.5GiB · difference: 455.3MiB (0%)
+WARNING: 65 directories unreadable — total underestimated.
 ```
 
-A diferença é o tamanho exato do buraco na lista.
+The difference is exactly the size of the hole in the list.
 
-## Limitações conhecidas
+## Known limitations
 
-- **Bind mounts.** Um bind mount herda o mesmo `st_dev`, então `du -x`
-  atravessa e pode contar duas vezes. Detectar exigiria ler o mountinfo.
-- **Arquivo apagado mas ainda aberto** não aparece no `du` (sem directory
-  entry). `--df-check` revela esse buraco na comparação com o `df`.
-- **Armazenamento em camadas** (btrfs, ZFS, Docker overlay) não tem noção de
-  "tamanho da pasta" bem definida; os números são do que está alocado por ali.
-- **`--no-nested`** esconde onde o peso está dentro do ancestral. É opt-in
-  justamente por isso.
+- **Bind mounts.** A bind mount inherits the same `st_dev`, so `du -x` walks
+  into it and may double count. Detecting that requires parsing mountinfo.
+- **Deleted-but-open files** do not appear in `du` (no directory entry).
+  `--df-check` exposes that gap when compared to `df`.
+- **Layered storage** (btrfs, ZFS, Docker overlay) has no well-defined
+  "folder size"; numbers are whatever is allocated there.
+- **`--no-nested`** hides where the weight sits inside the ancestor. That is
+  why it is opt-in.
 
-## Licença
+## License
 
-MIT. Veja [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE).
