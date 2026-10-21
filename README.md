@@ -33,11 +33,13 @@ curl -fsSL https://raw.githubusercontent.com/glearflame/topdirs/main/topdirs \
 chmod +x ~/.local/bin/topdirs
 ```
 
-Ou, clonando o repo:
+Ou, clonando o repo (instalador incluído):
 
 ```sh
 git clone https://github.com/glearflame/topdirs.git
-install -m755 topdirs/topdirs ~/.local/bin/topdirs
+cd topdirs
+./install.sh                 # ~/.local/bin (ou /usr/local/bin se for root)
+sudo ./install.sh            # para "sudo topdirs" funcionar
 ```
 
 Funciona em qualquer distro Linux com Bash 4+ e GNU coreutils (testado em
