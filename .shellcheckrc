@@ -1,0 +1,15 @@
+# Configuração do shellcheck para o topdirs.
+#
+# Os dois avisos abaixo são falsos positivos conhecidos deste script.
+# Mantidos desativados de propósito, com a justificativa ao lado.
+
+# SC2015: "A && B || C is not if-then-else".
+# Em `[[ "$COUNT" =~ ^[0-9]+$ ]] && ((COUNT > 0)) || die ...` o C só roda
+# quando a validação falha de verdade: se a regex casa e COUNT é 0, ((0 > 0))
+# retorna falso e o die é o comportamento desejado. Não é um else acidental.
+disable=SC2015
+
+# SC2329: "This function is never invoked".
+# cleanup() é chamada indiretamente por `trap cleanup EXIT INT TERM`; o
+# shellcheck não segue traps.
+disable=SC2329
